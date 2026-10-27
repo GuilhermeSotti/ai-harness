@@ -15,10 +15,17 @@ dependencies = [
 
 [project.scripts]
 harness = "ai_harness.cli:main"
+harness-mcp = "ai_harness.mcp_server:main"
 
 [project.optional-dependencies]
 test = [
     "pytest>=8,<9",
+]
+mcp = [
+    "mcp>=1.12,<2",
+]
+anthropic = [
+    "anthropic>=0.50,<1",
 ]
 
 [tool.setuptools.packages.find]

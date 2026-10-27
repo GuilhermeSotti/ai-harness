@@ -151,3 +151,8 @@ observed; `error` records a failed connection attempt. These states do not
 claim that any third-party integration in this repository is implemented or
 working. A real connection requires a provider implementation and a separately
 verified integration test.
+
+The local read-only Claude Code MCP server and its real Ollama/optional
+Anthropic agent providers are documented in
+[`AI_HARNESS_MCP.md`](AI_HARNESS_MCP.md). The generic integration contracts
+above remain separate from that concrete, bounded MCP application.

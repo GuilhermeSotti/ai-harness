@@ -39,7 +39,7 @@ def _store(tmp_path: Path) -> SQLiteExecutionStore:
 
 
 def _maestro(tmp_path: Path, **kwargs: Any) -> Maestro:
-    return Maestro(store=_store(tmp_path), **kwargs)
+    return Maestro(store=_store(tmp_path), simulation=True, **kwargs)
 
 
 def test_maestro_creates_identifiable_plan_before_execution(tmp_path: Path) -> None:
@@ -49,6 +49,15 @@ def test_maestro_creates_identifiable_plan_before_execution(tmp_path: Path) -> N
     assert len(run["plan"]["tasks"]) == 2
     assert all(task["task_id"] and task["agent_id"] for task in run["tasks"])
     assert all(task["status"] == TaskState.PENDING for task in run["tasks"])
+
+
+def test_maestro_requires_explicit_real_registry_and_planner(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="agent registry"):
+        Maestro(store=_store(tmp_path))
+
+    registry = AgentRegistry()
+    with pytest.raises(ValueError, match="provider-backed planner"):
+        Maestro(store=_store(tmp_path), registry=registry)
 
 
 def test_task_delegation_routes_message_and_result_to_maestro(tmp_path: Path) -> None:
@@ -68,7 +77,7 @@ def test_task_delegation_routes_message_and_result_to_maestro(tmp_path: Path) ->
 
 def test_run_history_reconstructs_messages_after_store_reopen(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    maestro = Maestro(store=store)
+    maestro = Maestro(store=store, simulation=True)
     plan = maestro.create_plan("Persist communication.")
     finished = asyncio.run(maestro.approve_plan(plan["run_id"], approved=True))
     reopened = SQLiteMaestroStore(store.path).run(finished["run_id"])
@@ -351,7 +360,8 @@ def test_maestro_cli_plan_approve_and_status_round_trip(
 ) -> None:
     database = tmp_path / "cli.sqlite3"
     assert main([
-        "--db", str(database), "maestro", "run", "CLI smoke test"
+        "--db", str(database), "--provider", "simulated",
+        "maestro", "run", "CLI smoke test"
     ]) == 0
     plan_output = capsys.readouterr().out
     run_id = next(
@@ -359,7 +369,10 @@ def test_maestro_cli_plan_approve_and_status_round_trip(
         for line in plan_output.splitlines() if '"run_id": "' in line
     )
 
-    assert main(["--db", str(database), "maestro", "approve", run_id]) == 0
+    assert main([
+        "--db", str(database), "--provider", "simulated",
+        "maestro", "approve", run_id
+    ]) == 0
     assert '"state": "completed"' in capsys.readouterr().out
     assert main(["--db", str(database), "maestro", "status", run_id]) == 0
     assert '"messages"' in capsys.readouterr().out

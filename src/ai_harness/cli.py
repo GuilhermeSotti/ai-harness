@@ -1,22 +1,27 @@
-"""Command-line entry point for the local simulated harness."""
+"""Command-line entry point for the provider-backed harness."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ai_harness.agents import allowed_roots_from_environment, make_real_agent_registry
+from ai_harness.planning import create_dynamic_plan
+from ai_harness.providers import provider_from_environment
 from ai_harness.runtime import (
     Harness,
     SQLiteExecutionStore,
     SimulatedProvider,
+    ToolRegistry,
     default_database_path,
     make_simulated_registry,
 )
-from ai_harness.maestro import Maestro, SQLiteMaestroStore
+from ai_harness.maestro import Maestro, MaestroError, SQLiteMaestroStore
 
 
 def _print_event(event: dict[str, Any]) -> None:
@@ -31,13 +36,25 @@ def _print_event(event: dict[str, Any]) -> None:
     print(f"[{timestamp}] {event['event_type']} " + " ".join(details), flush=True)
 
 
-def _format_run(store: SQLiteExecutionStore, task: str, database: Path) -> int:
-    print("Mode: simulated (no model or external API was called).", flush=True)
+def _format_run(
+    store: SQLiteExecutionStore, task: str, database: Path, provider_name: str
+) -> int:
     print(f"History database: {database}", flush=True)
+    if provider_name == "simulated":
+        print("Mode: simulated (no model or external API was called).", flush=True)
+        provider = SimulatedProvider()
+        tools = make_simulated_registry()
+    else:
+        provider = provider_from_environment(provider_name)
+        print(
+            f"Mode: real provider={provider.provider_id} model={provider.model}.",
+            flush=True,
+        )
+        tools = ToolRegistry()
     harness = Harness(
         store=store,
-        provider=SimulatedProvider(),
-        tools=make_simulated_registry(),
+        provider=provider,
+        tools=tools,
         observer=_print_event,
     )
     execution = asyncio.run(harness.run(task))
@@ -85,8 +102,38 @@ def _maestro_command(
     agent_id: str | None = None,
     limit: int = 20,
     agent_config: Path | None = None,
+    provider_name: str = "ollama",
 ) -> int:
-    maestro = Maestro(store=store, agent_config=agent_config)
+    provider = None
+    plan = None
+    if provider_name == "simulated":
+        maestro = Maestro(
+            store=store,
+            agent_config=agent_config,
+            simulation=True,
+        )
+    else:
+        if agent_config is not None:
+            raise ValueError("--agents-config is supported only with --provider simulated.")
+        provider = provider_from_environment(provider_name)
+        roots = allowed_roots_from_environment()
+        if operation == "run" and task is not None:
+            plan = asyncio.run(create_dynamic_plan(provider, task))
+            planner = lambda _objective: plan
+        else:
+            def planner(_objective: str):
+                raise MaestroError("No plan generation was requested for this command.")
+
+        maestro = Maestro(
+            store=store,
+            planner=planner,
+            registry=make_real_agent_registry(
+                provider=provider,
+                allowed_roots=roots,
+            ),
+            tools=ToolRegistry(),
+            task_context={"workspace_path": str(roots[0])},
+        )
     history = SQLiteMaestroStore(database)
     if operation == "agents":
         print(json.dumps(maestro.registry.all(), ensure_ascii=False, indent=2))
@@ -156,8 +203,14 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Optional JSON file configuring simulated agents.",
     )
+    parser.add_argument(
+        "--provider",
+        choices=("ollama", "anthropic", "simulated"),
+        default=os.getenv("AI_HARNESS_PROVIDER", "ollama"),
+        help="Model provider for new runs (default: AI_HARNESS_PROVIDER or ollama).",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run", help="Run a task in explicitly simulated mode.")
+    run = commands.add_parser("run", help="Run a task using the selected provider.")
     run.add_argument("task")
     status = commands.add_parser("status", help="Show a persisted execution.")
     status.add_argument("execution_id")
@@ -165,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     history.add_argument("--limit", type=int, default=20)
     tools = commands.add_parser("tools", help="Inspect authorized tools.")
     tools.add_argument("tools_command", choices=("list",))
-    maestro = commands.add_parser("maestro", help="Plan and coordinate simulated agents.")
+    maestro = commands.add_parser("maestro", help="Plan and coordinate agents.")
     operations = maestro.add_subparsers(dest="maestro_command", required=True)
     maestro_run = operations.add_parser("run", help="Plan a task; approve to execute it.")
     maestro_run.add_argument("task")
@@ -192,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     store = SQLiteExecutionStore(args.db)
 
     if args.command == "run":
-        return _format_run(store, args.task, args.db)
+        return _format_run(store, args.task, args.db, args.provider)
     if args.command == "status":
         return _format_status(store, args.execution_id)
     if args.command == "history":
@@ -200,10 +253,13 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--limit must be greater than zero.")
         return _format_history(store, args.limit)
     if args.command == "tools":
-        for definition in make_simulated_registry().definitions():
-            print(
-                f"{definition.name} [{definition.action}]: {definition.description}"
-            )
+        if args.provider == "simulated":
+            for definition in make_simulated_registry().definitions():
+                print(
+                    f"{definition.name} [{definition.action}]: {definition.description}"
+                )
+        else:
+            print("No task tools are enabled for real providers; agents are read-only.")
         return 0
     if args.command == "maestro":
         if args.maestro_command == "history" and args.limit < 1:
@@ -219,5 +275,6 @@ def main(argv: list[str] | None = None) -> int:
             agent_id=getattr(args, "agent", None),
             limit=getattr(args, "limit", 20),
             agent_config=args.agents_config,
+            provider_name=args.provider,
         )
     return 2

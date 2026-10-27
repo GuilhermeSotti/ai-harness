@@ -2,18 +2,18 @@
 
 Fundação independente e instalável para um runtime de agentes de IA, com
 controle de ciclo de vida, integrações desacopladas de fornecedores e decisões
-de política fora do modelo. O projeto está em estágio inicial (`0.1.0`); os
-adaptadores de provedores são contratos e precisam ser implementados e
-verificados pela aplicação que os utiliza.
+de política fora do modelo. O projeto está em estágio inicial (`0.1.0`) e inclui
+providers locais e agentes read-only; conectores opcionais precisam ser
+configurados e verificados pela aplicação que os utiliza.
 
 ## Requisitos
 
 - Python 3.12 ou superior (limitado a versões anteriores a 3.16)
 - Git
 
-O projeto não exige contas, chaves de API, serviços pagos ou acesso à rede para
-usar o núcleo e as políticas desta versão. Nenhum serviço externo é conectado
-automaticamente.
+Importar o núcleo e executar os testes não exige conta, chave ou serviço. Uma
+execução real usa o Ollama local configurado; o provider Anthropic opcional
+requer uma chave de API própria.
 
 ## Instalação no Windows
 
@@ -23,7 +23,7 @@ Na pasta do projeto:
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e ".[test]"
+python -m pip install -e ".[test,mcp]"
 python -m pytest
 ```
 
@@ -36,56 +36,61 @@ construído e versionado como distribuição Python.
 Após ativar o ambiente e instalar o pacote em modo editável:
 
 ```powershell
-harness run "Conte as palavras desta tarefa"
+harness run "Analise a estrutura deste projeto"
 ```
 
 No Windows PowerShell, se o comando `harness` ainda não estiver disponível,
 use o módulo diretamente:
 
 ```powershell
-python -m ai_harness run "Conte as palavras desta tarefa"
+python -m ai_harness run "Resuma este pedido em uma frase"
 ```
 
-A implementação inicial é **somente simulada**. A saída informa explicitamente
-que não usou modelo real nem API; o provider simulado propõe uma chamada à
-ferramenta `echo`, autorizada e sem efeitos externos, e então produz um texto
-marcado como simulado. Não há provider real incluído. A interface
-`ModelProvider` permite adaptadores futuros, mas o runtime não conecta
-provedores automaticamente.
+O provider padrão é Ollama local (`AI_HARNESS_PROVIDER=ollama`), usando o
+modelo `qwen3.8:27b` por padrão. O provider e o modelo podem ser selecionados
+por `AI_HARNESS_PROVIDER`, `AI_HARNESS_MODEL` e `AI_HARNESS_OLLAMA_URL`.
+Falhas de rede, autenticação ou geração são retornadas como falhas; não há
+fallback silencioso para simulação. Para executar explicitamente o provider
+determinístico de desenvolvimento, use `--provider simulated`.
 
 Exemplo de saída:
 
 ```text
-Mode: simulated (no model or external API was called).
+Mode: real provider=ollama model=qwen3.8:27b.
 History database: C:\Users\example\AppData\Local\ai-harness\history.sqlite3
 [10:15:22] execution.queued execution=<id> status=queued
 [10:15:22] execution.started execution=<id> status=running
 [10:15:22] agent.iteration.started execution=<id> status=running Iteration 1/8
-[10:15:22] provider.response execution=<id> status=running Provider mode: simulated
-[10:15:22] tool.started execution=<id> status=running tool=echo
-[10:15:22] tool.completed execution=<id> status=running tool=echo ...
-[10:15:22] execution.completed execution=<id> status=completed Mode: simulated
+[10:15:22] provider.response execution=<id> status=running Provider mode: real
+[10:15:22] execution.completed execution=<id> status=completed Mode: real
 Execution ID: <id>
 State: completed
-Result: Simulated run completed; no real model was used.
+Result: <texto gerado pelo modelo>
 ```
 
 Comandos disponíveis:
 
 ```powershell
+harness --provider simulated run "Teste determinístico"
 harness status <execution_id>
 harness history
 harness tools list
 ```
 
-## Maestro e coordenação simulada
+## Maestro e agentes com provider real
 
-O comando `maestro` cria um plano persistido que aguarda aprovação antes de
-delegar. O perfil padrão encaminha tarefas independentes a dois agentes locais
-(`analyst` e `reviewer`). Ambos executam pelo `Harness` existente e pelo
-`SimulatedProvider`; não há conexão de modelos nem rede. O Maestro não recebe
-ferramentas próprias, e cada agente só recebe as ferramentas explicitamente
-autorizadas em seu registro e filtradas pela política do runtime.
+O comando `maestro run` usa o provider configurado para propor um plano
+estruturado, valida tarefas e dependências e o persiste aguardando aprovação.
+Os agentes `analyst` e `reviewer` leem somente arquivos de texto abaixo de
+`AI_HARNESS_ALLOWED_ROOTS`, com limites de quantidade/tamanho e sem execução de
+comandos ou escrita. O analyst produz fatos, hipóteses e recomendações com
+citações de evidência; o reviewer recebe os resultados dependentes e deve
+identificar achados independentes. Resultados, estados e eventos permanecem no
+SQLite do Maestro.
+
+O provider Anthropic é opcional: instale `.[anthropic]`, configure
+`AI_HARNESS_PROVIDER=anthropic`, `AI_HARNESS_MODEL` e `ANTHROPIC_API_KEY`. O
+login do Claude Code não autentica a API Anthropic do harness.
 
 No PowerShell, as operações são:
 
@@ -119,13 +124,8 @@ O fluxo atual não retoma tarefas parcialmente executadas nem repete
 automaticamente falhas.
 
 Agentes simulados adicionais podem ser descritos em JSON, passando
-`--agents-config <arquivo>` antes de `maestro`. O arquivo aceita somente agentes
-com `provider` igual a `simulated`; provedores externos são recusados até que
-um adaptador real seja implementado e verificado. As permissões de ferramenta
-requerem tanto o nome da ferramenta em `authorized_tools` quanto
-`runtime.read` para leitura ou `tool:<nome>:<ação>` para uma permissão
-específica. A política do runtime continua exigindo aprovação exata para
-escritas e ações externas.
+`--provider simulated --agents-config <arquivo>` antes de `maestro`. As
+ferramentas simuladas não são habilitadas para os agentes reais.
 
 Exemplo de configuração (salve como `.\agents.json` e forneça também ao aprovar
 um plano criado com essa configuração):
@@ -162,9 +162,13 @@ um plano criado com essa configuração):
 ```
 
 ```powershell
-python -m ai_harness --db .\maestro.sqlite3 --agents-config .\agents.json maestro run "Solicitação"
-python -m ai_harness --db .\maestro.sqlite3 --agents-config .\agents.json maestro approve <run_id>
+python -m ai_harness --db .\maestro.sqlite3 --provider simulated --agents-config .\agents.json maestro run "Solicitação"
+python -m ai_harness --db .\maestro.sqlite3 --provider simulated --agents-config .\agents.json maestro approve <run_id>
 ```
+
+Ao usar `Maestro` diretamente, forneça um registro de agentes e um planejador
+provider-backed. O modo determinístico só é ativado com `simulation=True`
+(ou pela CLI `--provider simulated`).
 
 Não há uma rede de serviços para iniciar. A CLI é local e não expõe um painel
 ou servidor de monitoramento; o acompanhamento disponível é pelo SQLite e pelos
@@ -202,25 +206,29 @@ adaptadores.
   externos são assinados em memória e vinculados à execução e solicitação exatas.
 - Harness assíncrono de tarefas com limite de iterações, timeout, cancelamento,
   validação de ferramenta e eventos estruturados emitidos em tempo real.
-- Contrato neutro de provider, agente inicial e ferramenta `echo` exclusivamente
-  simulados, sem chamadas de rede.
+- Providers reais Ollama e Anthropic opcional, além do provider simulado
+  selecionado explicitamente para desenvolvimento.
+- Agentes read-only `analyst` e `reviewer`, planejamento estruturado e servidor
+  MCP stdio com execução persistida.
 - SQLite para execuções, eventos, chamadas, resumos de resultado e decisões de
   aprovação; argumentos não são gravados em eventos nem em chamadas.
 - Contratos para agentes, transportes MCP e plataformas externas, registro de
   integrações/skills e políticas existentes.
 
-## Limites desta entrega
+## Integração MCP
 
-Não há provider de modelo real, APIs, conectores externos, execução de comandos
-ou retomada de execução pendente pela CLI. Não há retries automáticos; handlers
-de ferramentas devem ser assíncronos para que timeout e cancelamento sejam
-aplicados. Providers, handlers e aprovações reais precisam ser integrados
-conscientemente por uma aplicação confiável.
-Confirme identidade e autorização de quem aprova fora do harness. O banco
-persiste o texto da tarefa; não inclua nele credenciais ou dados que não devam
-ficar em disco. Eventos e registros de chamadas guardam resumos e digest dos
-argumentos, e erros são reduzidos ao tipo da exceção para evitar vazar
-conteúdo. Esta versão é um núcleo local inicial, não um serviço de produção.
+Instale a dependência opcional `.[mcp]` e registre o comando stdio
+`python -m ai_harness.mcp_server` no Claude Code. Consulte
+[`docs/AI_HARNESS_MCP.md`](docs/AI_HARNESS_MCP.md) para escopo, allowlist,
+ferramentas, validação e configuração no Windows.
+
+O servidor MCP não oferece ferramentas de escrita, shell ou rede aos agentes.
+Planos gerados ficam aguardando aprovação; a chamada explícita a
+`harness_run_agent` executa apenas análise/revisão read-only solicitada pelo
+chamador. Não há retentativa automática nem retomada de tarefas parcialmente
+executadas. O banco persiste solicitações e resultados; não inclua nele dados
+que não devam ficar em disco. A configuração de autenticação Anthropic e o
+acesso ao modelo local continuam independentes da sessão Claude Code.
 
 ## Licenciamento
 

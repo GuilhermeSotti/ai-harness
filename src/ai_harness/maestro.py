@@ -1,4 +1,4 @@
-"""Central, policy-bounded coordination for simulated and future agent adapters."""
+"""Policy-bounded coordination for provider-backed and explicit simulated agents."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from ai_harness.runtime import (
     ToolRegistry,
     make_simulated_registry,
 )
+from ai_harness.redaction import redact_sensitive_text
 
 
 class MaestroError(Exception):
@@ -113,6 +114,8 @@ class AgentResult(BaseModel):
     artifact_refs: tuple[str, ...] = ()
     duration_ms: float | None = Field(default=None, ge=0)
     tokens_used: int | None = Field(default=None, ge=0)
+    provider: str | None = None
+    model: str | None = None
 
 
 class AgentTask(BaseModel):
@@ -507,6 +510,8 @@ class SimulatedSpecialist:
             limitations=("Simulated output is not an expert assessment.",),
             artifact_refs=(f"execution:{execution['execution_id']}",),
             duration_ms=_duration(execution),
+            provider=self.provider.provider_id,
+            model="deterministic",
         )
 
 
@@ -523,12 +528,29 @@ class Maestro:
         tools: ToolRegistry | None = None,
         policy: ToolPolicy | None = None,
         agent_config: str | Path | None = None,
+        task_context: dict[str, Any] | None = None,
+        simulation: bool = False,
     ) -> None:
         self.runtime_store = store
         self.store = SQLiteMaestroStore(store.path)
         self.limits = limits or MaestroLimits()
+        if registry is None and agent_config is None and not simulation:
+            raise ValueError(
+                "Provide an agent registry or explicitly set simulation=True."
+            )
+        if planner is None and agent_config is None and not simulation:
+            raise ValueError(
+                "A provider-backed planner is required outside explicit simulation."
+            )
         self.planner = planner or _default_plan
-        self.tools = tools or make_simulated_registry()
+        self.task_context = dict(task_context or {})
+        self.tools = (
+            tools
+            if tools is not None
+            else make_simulated_registry()
+            if simulation or agent_config is not None
+            else ToolRegistry()
+        )
         self.policy = policy or ToolPolicy()
         self.registry = registry or (
             load_simulated_agent_registry(
@@ -544,6 +566,7 @@ class Maestro:
         self._agent_activity_lock = asyncio.Lock()
 
     def create_plan(self, user_request: str) -> dict[str, Any]:
+        user_request = redact_sensitive_text(user_request)
         if not user_request.strip():
             raise ValueError("Task cannot be blank.")
         plan = self.planner(user_request)
@@ -892,6 +915,7 @@ class Maestro:
             if task["task_id"] in item["dependencies"]
         }
         context = {
+            **self.task_context,
             "user_request": snapshot["user_request"],
             "dependency_results": dependency_context,
         }
@@ -1071,8 +1095,34 @@ class Maestro:
             self.registry.get(task["agent_id"])[0].provider
             for task in snapshot["tasks"]
         }
+        known_real_providers = {"ollama", "anthropic"}
+        if providers == {"simulated"}:
+            mode = "simulated"
+        elif providers and providers <= known_real_providers:
+            mode = "real" if len(providers) == 1 else "mixed"
+        elif "simulated" in providers:
+            mode = "mixed"
+        else:
+            mode = "unverified"
+        limitations.add(
+            "Results depend on configured adapters and should be validated independently."
+        )
+        if mode == "simulated":
+            limitations.add(
+                "Results depend on the configured adapters; simulated adapters are not expert evidence."
+            )
+        elif mode == "unverified":
+            limitations.add(
+                "Provider identity is not verified by the built-in adapters."
+            )
         return {
-            "summary": "Consolidated simulated agent results.",
+            "summary": (
+                "Consolidated simulated agent results."
+                if mode == "simulated"
+                else "Consolidated results from unverified adapters."
+                if mode == "unverified"
+                else "Consolidated agent results."
+            ),
             "task_results": summaries,
             "incomplete_tasks": incomplete,
             "divergences": divergences,
@@ -1080,10 +1130,8 @@ class Maestro:
                 {"claim": claim, "agents": agents}
                 for claim, agents in claims.items() if len(set(agents)) > 1
             ],
-            "limitations": sorted(limitations | {
-                "Results depend on the configured adapters; simulated adapters are not expert evidence."
-            }),
-            "mode": "simulated" if providers == {"simulated"} else "mixed",
+            "limitations": sorted(limitations),
+            "mode": mode,
         }
 
     def _refresh_consolidation(self, run_id: UUID) -> None:

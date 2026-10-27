@@ -27,6 +27,7 @@ from ai_harness.policies import (
     ToolPolicy,
     ToolRequest,
 )
+from ai_harness.redaction import redact_sensitive_text
 
 
 class RunState(StrEnum):
@@ -632,6 +633,7 @@ class Harness:
     async def run(
         self, task: str, *, cancellation: asyncio.Event | None = None
     ) -> dict[str, Any]:
+        task = redact_sensitive_text(task)
         if not task.strip():
             raise ValueError("Task cannot be blank.")
         execution_id = uuid4()
@@ -825,6 +827,15 @@ class Harness:
                 self._emit(
                     execution_id, "tool.completed", RunState.RUNNING,
                     duration_ms=duration, tool_name=proposed.name, summary=summary,
+                )
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "tool_call": {
+                            "name": proposed.name,
+                            "arguments": proposed.arguments,
+                        },
+                    }
                 )
                 messages.append(
                     {
